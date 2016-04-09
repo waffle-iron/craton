@@ -1,4 +1,17 @@
-"""Models defined using SQLAlchemy ORM"""
+"""Models inventory, as defined using SQLAlchemy ORM
+
+Note that our assumption is that we have three independent aspects of
+a play:
+
+* specific workflow
+* configuration, as managed by a GitHub-like versioned set of config
+  files
+* inventory for a given tenant, as modeled here
+
+In particular, this means that the configuration is used to interpret
+any inventory data.
+
+"""
 
 from oslo_db.sqlalchemy import models
 from sqlalchemy import (
@@ -74,7 +87,7 @@ class Tenant(Base):
     # suffices to define multitenancy for MVP
 
     hosts = relationship('Host', back_populates='tenant')
-    groups = relationship('Group', back_populates='tenant')
+    access_secrets = relationship('AccessSecret', back_populates='tenant')
 
 
 # FIXME there are stricter requirements for key names in Ansible (see
@@ -88,14 +101,14 @@ class HostVariables(Base):
     __tablename__ = 'host_variables'
     host_id = Column(ForeignKey('hosts.id'), primary_key=True)
     key = Column(String(255), primary_key=True)
-    value = Column(Text)
-    _repr_columns = [value]
+    value = Column(JSONType)
+    _repr_columns = [key, value]
 
 
-host_grouping = Table(
-    'host_grouping', Base.metadata,
+host_tagging = Table(
+    'host_tagging', Base.metadata,
     Column('host_id', ForeignKey('hosts.id'), primary_key=True),
-    Column('group_id', ForeignKey('groups.id'), primary_key=True))
+    Column('tag_name', ForeignKey('tags.name'), primary_key=True))
                       
 
 # TODO consider using SqlAlchemy's support for inheritance
@@ -106,44 +119,41 @@ host_grouping = Table(
 # see http://docs.sqlalchemy.org/en/latest/orm/inheritance.html#single-table-inheritance
 
 class Host(ProxiedDictMixin, Base):
-    """Models descriptive data about a host, including discovered facts"""
+    """Models descriptive data about a host"""
     __tablename__ = 'hosts'
-    id = Column(UUIDType, primary_key=True)
+    id = Column(Integer, primary_key=True)
     tenant_id = Column(
         UUIDType, ForeignKey('tenants.id'), index=True, nullable=False)
-    secret_id = Column(UUIDType, ForeignKey('secrets.id'))
+    access_secret_id = Column(Integer, ForeignKey('access_secrets.id'))
     hostname = Column(String(255), nullable=False)
     ip_address = Column(IPAddressType, nullable=False)
     # active hosts for administration; this is not state:
     # the host may or may not be reachable by Ansible/other tooling
     active = Column(Boolean, default=True)
-    # discovered facts about the host
-    facts = Column(JSONType)
 
     UniqueConstraint(tenant_id, hostname)
     UniqueConstraint(tenant_id, ip_address)
 
     _repr_columns=[id, hostname]
 
-    groups = relationship(
-        'Group',
-        secondary=host_grouping,
+    tags = relationship(
+        'Tag',
+        secondary=host_tagging,
         back_populates='hosts')
 
     # many-to-one relationship with tenants
     tenant = relationship('Tenant', back_populates='hosts')
 
-    # optional many-to-one relationship with secrets; don't care about
-    # the backref
-    secret = relationship('Secret')
+    # optional many-to-one relationship with a host-specific secret;
+    access_secret = relationship('AccessSecret', back_populates='hosts')
 
     # provide arbitrary K/V mapping to associated HostVariables table
     variables = relationship(
         'HostVariables',
         collection_class=attribute_mapped_collection('key'))
 
-    # allows access to a host object using dict ops - get/set/del -
-    # using [] indexing
+    # allows access to host variables using dict ops - get/set/del -
+    # by using standard Python [] indexing
     _proxied = association_proxy(
         'variables', 'value',
         creator=lambda key, value: HostVariables(key=key, value=value))
@@ -153,64 +163,49 @@ class Host(ProxiedDictMixin, Base):
         return self.variables.any(key=key, value=value)
 
 
-class Group(Base):
-    """Models a grouping of hosts.
+class Tag(Base):
+    """Models a tag on hosts.
 
-    This includes the following groupings:
-    
-    * Ansible groups
-    * OpenStack regions and cells
+    Such tags include groupings like Ansible groups and OpenStack
+    regions and cells; as well as arbitrary other tags.
 
-    Groups use an adjacency list representation, with possibly some
-    children referring to a given parent.
+    Rather than subclassing tags, we can use prefixes such as group-
+    or region- or cell-.
+
+    It is assumed that hierarchies for groups, if any, is represented
+    in an external format, such as a group-of-group inventory in
+    Ansible.
     """
-    __tablename__ = 'groups'
-    id = Column(UUIDType, primary_key=True)
-    tenant_id = Column(
-        UUIDType, ForeignKey('tenants.id'), index=True, nullable=False)
-    parent_id = Column(UUIDType, ForeignKey('groups.id'))
-    name = Column(String(255))
-    # Our assumption is any config yaml file that needs some sort of
-    # include/overlay mechanism will use Ansible includes/roles; or
-    # perhaps something similar for YAML include in general.  So this
-    # means we need just one reference.
-    #
-    # NOTE but we likely need some sort of resolution scheme to handle
-    # branches, etc.
-    config = Column(URLType)
+    __tablename__ = 'tags'
+    name = Column(String(255), primary_key=True)
 
-    UniqueConstraint(tenant_id, name)
-
-    _repr_columns = [id, name]
-
-    # self relationship, supporting adjacency list representation
-    children = relationship(
-        'Group',
-        backref=backref('parent', remote_side=[id]))
+    _repr_columns = [name]
 
     # many-to-many relationship with hosts
     hosts = relationship(
         'Host',
-        secondary=host_grouping,
-        back_populates='groups')
-
-    # many-to-one relationship with tenants
-    tenant = relationship('Tenant', back_populates='groups')
+        secondary=host_tagging,
+        back_populates='tags')
 
 
-# TODO we may want to subclass types of secrets
-
-# TODO should determine integration with systems like Barbican that
-# can provide additional secret data to decrypt encrypted certs -
-# which is presumably what we should be storing. See
-# https://github.com/rackerlabs/craton/issues/7
-
-class Secret(Base):
+class AccessSecret(Base):
     """Represents a secret for accessing a host. It may be shared.
 
-    For now we assume a PEM-encoded certificate that wraps the
-    private key.
+    For now we assume a PEM-encoded certificate that wraps the private
+    key. Such certs may or may not be encrypted; if encrypted, the
+    configuration specifies how to interact with other systems, such
+    as Barbican or Hashicorp Vault, to retrieve secret data to unlock
+    this cert.
+
+    Note that this does not include secrets such as Ansible vault
+    files; those are stored outside the inventory database as part of
+    the configuration.
     """
-    __tablename__ = 'secrets'
-    id = Column(UUIDType, primary_key=True)
+    __tablename__ = 'access_secrets'
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(
+        UUIDType, ForeignKey('tenants.id'), index=True, nullable=False)
     cert = Column(Text)
+
+    hosts = relationship('Host', back_populates='access_secret')
+    tenant = relationship('Tenant', back_populates='access_secrets')
