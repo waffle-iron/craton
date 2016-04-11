@@ -108,7 +108,7 @@ class HostVariables(Base):
 host_tagging = Table(
     'host_tagging', Base.metadata,
     Column('host_id', ForeignKey('hosts.id'), primary_key=True),
-    Column('tag_name', ForeignKey('tags.name'), primary_key=True))
+    Column('tag_id', ForeignKey('tags.id'), primary_key=True))
                       
 
 # TODO consider using SqlAlchemy's support for inheritance
@@ -136,10 +136,8 @@ class Host(ProxiedDictMixin, Base):
 
     _repr_columns=[id, hostname]
 
-    tags = relationship(
-        'Tag',
-        secondary=host_tagging,
-        back_populates='hosts')
+    _tags = relationship('Tag', secondary=lambda: host_tagging, collection_class=set)
+    tags = association_proxy('_tags', 'tag')
 
     # many-to-one relationship with tenants
     tenant = relationship('Tenant', back_populates='hosts')
@@ -177,15 +175,13 @@ class Tag(Base):
     Ansible.
     """
     __tablename__ = 'tags'
-    name = Column(String(255), primary_key=True)
+    id = Column(Integer, primary_key=True)
+    tag = Column(String(255), unique=True)
 
-    _repr_columns = [name]
+    _repr_columns = [tag]
 
-    # many-to-many relationship with hosts
-    hosts = relationship(
-        'Host',
-        secondary=host_tagging,
-        back_populates='tags')
+    def __init__(self, tag):
+        self.tag = tag
 
 
 class AccessSecret(Base):
