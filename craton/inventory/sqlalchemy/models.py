@@ -3,14 +3,13 @@
 Note that our assumption is that we have three independent aspects of
 a play:
 
-* specific workflow
 * configuration, as managed by a GitHub-like versioned set of config
-  files
+  files (as used by Ansible and similar systems)
+* specific workflow, which is written in Python (eg with TaskFlow)
 * inventory for a given tenant, as modeled here
 
 In particular, this means that the configuration is used to interpret
 any inventory data.
-
 """
 
 from oslo_db.sqlalchemy import models
