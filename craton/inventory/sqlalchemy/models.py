@@ -82,11 +82,93 @@ class Tenant(Base):
     __tablename__ = 'tenants'
     id = Column(UUIDType, primary_key=True)
     name = Column(String(255))
+    _repr_columns=[id, name]
+
     # TODO we will surely need to define more columns, but this
     # suffices to define multitenancy for MVP
 
-    hosts = relationship('Host', back_populates='tenant')
-    access_secrets = relationship('AccessSecret', back_populates='tenant')
+    # one-to-many relationship with the following objects
+    regions = relationship('Region', back_populates='tenant')
+    #cells = relationship('Cell', back_populates='tenant')
+
+
+class Region(Base):
+    __tablename__ = 'regions'
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(
+        UUIDType, ForeignKey('tenants.id'), index=True, nullable=False)
+    name = Column(String(255))
+    _repr_columns=[id, name]
+
+    UniqueConstraint(tenant_id, name)
+
+    tenant = relationship('Tenant', back_populates='regions')
+    cells = relationship('Cell', back_populates='region')
+    hosts = relationship('Host', back_populates='region')
+
+
+class Cell(Base):
+    __tablename__ = 'cells'
+    id = Column(Integer, primary_key=True)
+    region_id = Column(
+        Integer, ForeignKey('regions.id'), index=True, nullable=False)
+    name = Column(String(255))
+    _repr_columns=[id, name]
+
+    UniqueConstraint(region_id, name)
+
+    region = relationship('Region', back_populates='cells')
+    hosts = relationship('Host', back_populates='cell')
+
+
+# TODO consider using SqlAlchemy's support for inheritance
+# hierarchies, eg ComputeHost < Host but first need to determine what
+# is uniquely required for a ComputeHost; otherwise just use an
+# enumerated type to distinguish
+#
+# see http://docs.sqlalchemy.org/en/latest/orm/inheritance.html#single-table-inheritance
+
+class Host(ProxiedDictMixin, Base):
+    """Models descriptive data about a host"""
+    __tablename__ = 'hosts'
+    id = Column(Integer, primary_key=True)
+    region_id = Column(Integer, ForeignKey('regions.id'), index=True, nullable=False) 
+    cell_id = Column(Integer, ForeignKey('cells.id'), index=True, nullable=True) 
+    access_secret_id = Column(Integer, ForeignKey('access_secrets.id'))
+    hostname = Column(String(255), nullable=False)
+    ip_address = Column(IPAddressType, nullable=False)
+    # this means the host is "active" for administration; it is explictly not state:
+    # the host may or may not be reachable by Ansible/other tooling
+    active = Column(Boolean, default=True)
+    _repr_columns=[id, hostname]
+
+    UniqueConstraint(region_id, hostname)
+    UniqueConstraint(region_id, ip_address)
+
+    _tags = relationship('Tag', secondary=lambda: host_tagging, collection_class=set)
+    tags = association_proxy('_tags', 'tag')
+
+    # many-to-one relationship to regions and cells
+    region = relationship('Region', back_populates='hosts')
+    cell = relationship('Cell', back_populates='hosts')
+
+    # optional many-to-one relationship to a host-specific secret;
+    access_secret = relationship('AccessSecret', back_populates='hosts')
+
+    # provide arbitrary K/V mapping to associated HostVariable objects
+    variables = relationship(
+        'HostVariable',
+        collection_class=attribute_mapped_collection('key'))
+
+    # allows access to host variables using dict ops - get/set/del -
+    # by using standard Python [] indexing
+    _proxied = association_proxy(
+        'variables', 'value',
+        creator=lambda key, value: HostVariable(key=key, value=value))
+
+    @classmethod
+    def with_characteristic(self, key, value):
+        return self.variables.any(key=key, value=value)
 
 
 # FIXME there are stricter requirements for key names in Ansible (see
@@ -95,7 +177,7 @@ class Tenant(Base):
 # We may want to represent these requirements with subclassing on
 # HostVariables.
 
-class HostVariables(Base):
+class HostVariable(Base):
     """Represents specific key/value bindings for a given host."""
     __tablename__ = 'host_variables'
     host_id = Column(ForeignKey('hosts.id'), primary_key=True)
@@ -108,66 +190,15 @@ host_tagging = Table(
     'host_tagging', Base.metadata,
     Column('host_id', ForeignKey('hosts.id'), primary_key=True),
     Column('tag_id', ForeignKey('tags.id'), primary_key=True))
-                      
-
-# TODO consider using SqlAlchemy's support for inheritance
-# hierarchies, eg ComputeHost < Host but first need to determine what
-# is uniquely required for a ComputeHost; otherwise use an enumerated
-# type to distinguish
-#
-# see http://docs.sqlalchemy.org/en/latest/orm/inheritance.html#single-table-inheritance
-
-class Host(ProxiedDictMixin, Base):
-    """Models descriptive data about a host"""
-    __tablename__ = 'hosts'
-    id = Column(Integer, primary_key=True)
-    tenant_id = Column(
-        UUIDType, ForeignKey('tenants.id'), index=True, nullable=False)
-    access_secret_id = Column(Integer, ForeignKey('access_secrets.id'))
-    hostname = Column(String(255), nullable=False)
-    ip_address = Column(IPAddressType, nullable=False)
-    # active hosts for administration; this is not state:
-    # the host may or may not be reachable by Ansible/other tooling
-    active = Column(Boolean, default=True)
-
-    UniqueConstraint(tenant_id, hostname)
-    UniqueConstraint(tenant_id, ip_address)
-
-    _repr_columns=[id, hostname]
-
-    _tags = relationship('Tag', secondary=lambda: host_tagging, collection_class=set)
-    tags = association_proxy('_tags', 'tag')
-
-    # many-to-one relationship with tenants
-    tenant = relationship('Tenant', back_populates='hosts')
-
-    # optional many-to-one relationship with a host-specific secret;
-    access_secret = relationship('AccessSecret', back_populates='hosts')
-
-    # provide arbitrary K/V mapping to associated HostVariables table
-    variables = relationship(
-        'HostVariables',
-        collection_class=attribute_mapped_collection('key'))
-
-    # allows access to host variables using dict ops - get/set/del -
-    # by using standard Python [] indexing
-    _proxied = association_proxy(
-        'variables', 'value',
-        creator=lambda key, value: HostVariables(key=key, value=value))
-
-    @classmethod
-    def with_characteristic(self, key, value):
-        return self.variables.any(key=key, value=value)
 
 
 class Tag(Base):
     """Models a tag on hosts.
 
-    Such tags include groupings like Ansible groups and OpenStack
-    regions and cells; as well as arbitrary other tags.
+    Such tags include groupings like Ansible groups; as well as
+    arbitrary other tags.
 
     Rather than subclassing tags, we can use prefixes such as group-
-    or region- or cell-.
 
     It is assumed that hierarchies for groups, if any, is represented
     in an external format, such as a group-of-group inventory in
@@ -198,9 +229,6 @@ class AccessSecret(Base):
     """
     __tablename__ = 'access_secrets'
     id = Column(Integer, primary_key=True)
-    tenant_id = Column(
-        UUIDType, ForeignKey('tenants.id'), index=True, nullable=False)
     cert = Column(Text)
 
     hosts = relationship('Host', back_populates='access_secret')
-    tenant = relationship('Tenant', back_populates='access_secrets')
