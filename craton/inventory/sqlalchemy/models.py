@@ -206,6 +206,11 @@ class Label(Base, VariableMixin):
     def __init__(self, label):
         self.label = label
 
+    hosts = relationship(
+        "Host",
+        secondary=host_labels,
+        back_populates="_labels")
+
 
 class AccessSecret(Base):
     """Represents a secret for accessing a host. It may be shared.
