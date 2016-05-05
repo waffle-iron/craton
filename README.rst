@@ -1,6 +1,9 @@
 .. image:: https://badge.waffle.io/rackerlabs/craton.png?label=ready&title=Ready 
  :target: https://waffle.io/rackerlabs/craton
  :alt: 'Stories in Ready'
+.. image:: https://badge.waffle.io/rackerlabs/craton.png?label=ready&title=Ready 
+ :target: https://waffle.io/rackerlabs/craton
+ :alt: 'Stories in Ready'
 ===============================
 craton
 ===============================
